@@ -22,9 +22,11 @@ def run_my_script():
         types = data.get('types')
         year = data.get('year')
         mmdd = data.get('mmdd')
+
+        pre = data.get('pre')
         
         # Validate required parameters
-        if not all([election_id, country_name, types, year, mmdd]):
+        if not all([election_id, country_name, types, year, mmdd, pre]):
             return jsonify({'error': 'Missing required parameters'}), 400
         
         # Compose prompt using the parameters
@@ -43,6 +45,8 @@ def run_my_script():
         with open('/Users/samueltaplin/research/llmneldacoding/NELDA_Codebook_V5.pdf', 'rb') as pdf_file:
             pdf_data = pdf_file.read()
         
+        if pre:
+            # Get different data here
         # Configure generation config
         generation_config = types.GenerateContentConfig(
             system_instruction="You are an expert in election monitoring and the NELDA dataset coding system.",
