@@ -18,12 +18,16 @@ Create a `.env` file in this directory with the following variables:
 ```env
 CRONJOB_API_KEY=your_cronjob_org_api_key_here
 GEMINI_API_KEY=your_google_gemini_api_key_here
+MONGODB_USERNAME=your_mongodb_username
+MONGODB_PASSWORD=your_mongodb_password
 SERVER_URL=http://localhost:5000
 ```
 
 **Required variables:**
 - `CRONJOB_API_KEY` - Your API key from cronjob.org for scheduling jobs
 - `GEMINI_API_KEY` - Your Google Gemini API key for AI analysis
+- `MONGODB_USERNAME` - Your MongoDB Atlas database username
+- `MONGODB_PASSWORD` - Your MongoDB Atlas database password
 
 **Optional variables:**
 - `SERVER_URL` - URL where your server is running (defaults to http://localhost:5000)
