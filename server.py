@@ -1,5 +1,7 @@
 import os
 import json
+import sys
+import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
 import google.genai as genai
@@ -28,45 +30,13 @@ load_env_file()
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 
-def store_in_mongodb(data):
-    """Store election analysis data in MongoDB using pymongo."""
-    username = os.environ.get("MONGODB_USERNAME")
-    password = os.environ.get("MONGODB_PASSWORD")
-
-    if not username or not password:
-        raise ValueError(
-            "MONGODB_USERNAME and MONGODB_PASSWORD must be set in environment variables"
-        )
-
-    # MongoDB connection string for Atlas
-    connection_string = f"mongodb+srv://{username}:{password}@socialchoice.mongodb.net/?retryWrites=true&w=majority"
-
+def process_nelda_analysis_background(request_data):
+    """Process NELDA analysis in background thread - continues even if client disconnects."""
     try:
-        # Connect to MongoDB
-        client = MongoClient(connection_string)
-
-        # Select database and collection
-        db = client["neldaelections"]
-        collection = db["jsoncodings"]
-
-        # Insert the document
-        result = collection.insert_one(data)
-
-        # Close the connection
-        client.close()
-
-        return {"insertedId": str(result.inserted_id)}
-
-    except Exception as e:
-        print(f"MongoDB storage failed: {e}")
-        raise
-
-
-@app.route("/runNelda", methods=["POST"])
-def run_my_script():
-    try:
-        # Get JSON data from request body
-        data = request.get_json()
+        print("=== BACKGROUND NELDA PROCESSING START ===", flush=True)
+        
+        data = request_data
+        print(f"Processing request data: {data}", flush=True)
 
         # Extract required parameters
         election_id = data.get("electionId")
@@ -74,20 +44,30 @@ def run_my_script():
         election_types = data.get("types")
         year = data.get("year")
         mmdd = data.get("mmdd")
-
         pre = data.get("pre")
 
-        # Validate required parameters
-        if not all([election_id, country_name, election_types, year, mmdd, pre]):
-            return jsonify({"error": "Missing required parameters"}), 400
+        print(f"Extracted parameters:", flush=True)
+        print(f"  - electionId: {election_id}", flush=True)
+        print(f"  - countryName: {country_name}", flush=True)
+        print(f"  - types: {election_types}", flush=True)
+        print(f"  - year: {year}", flush=True)
+        print(f"  - mmdd: {mmdd}", flush=True)
+        print(f"  - pre: {pre}", flush=True)
 
+        print("📖 Reading NELDA codebook PDF...", flush=True)
         # Read the NELDA codebook PDF
-        with open(
-            "/Users/samueltaplin/research/llmneldacoding/NELDA_Codebook_V5.pdf", "rb"
-        ) as pdf_file:
-            pdf_data = pdf_file.read()
+        try:
+            with open(
+                "/Users/samueltaplin/research/llmneldacoding/NELDA_Codebook_V5.pdf",
+                "rb",
+            ) as pdf_file:
+                pdf_data = pdf_file.read()
+            print(f"✓ PDF loaded successfully ({len(pdf_data)} bytes)", flush=True)
+        except Exception as e:
+            print(f"ERROR: Failed to read PDF file: {e}", flush=True)
+            return
 
-        # Get different data here
+        print("⚙️ Configuring Gemini generation config...", flush=True)
         # Configure generation config
         generation_config = types.GenerateContentConfig(
             system_instruction="You are an expert in election monitoring and the NELDA dataset coding system.",
@@ -95,9 +75,11 @@ def run_my_script():
             response_mime_type="text/plain",
             tools=[types.Tool(google_search=types.GoogleSearch())],
         )
+        print("✓ Generation config created", flush=True)
 
-        userPromptContent = (
-            [
+        print("📝 Creating user prompt content...", flush=True)
+        try:
+            userPromptContent = [
                 types.Content(
                     role="user",
                     parts=[
@@ -117,7 +99,7 @@ Remember to double check your answer to make sure that your coding matches the e
 The election details:
 - Election ID: {election_id}
 - Country: {country_name}
-- Election Types: {types}
+- Election Types: {election_types}
 - Year: {year}
 - Date (MM/DD): {mmdd}
 
@@ -125,14 +107,29 @@ Please analyze this specific election and provide NELDA coding for all relevant 
                         ),
                     ],
                 )
-            ],
-        )
+            ]
+            print("✓ User prompt content created", flush=True)
+        except Exception as e:
+            print(f"ERROR: Failed to create user prompt content: {e}", flush=True)
+            return
 
+        print("🚀 Sending request to Gemini API (this may take a while)...", flush=True)
         # Send prompt to Gemini API
-        response = client.models.generate_content(
-            model="gemini-2.5-pro", contents=userPromptContent, config=generation_config
-        )
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-pro",
+                contents=userPromptContent,
+                config=generation_config,
+            )
+            print("✓ Received response from Gemini API", flush=True)
+            print(
+                f"Response length: {len(response.text) if response.text else 0} characters", flush=True
+            )
+        except Exception as e:
+            print(f"ERROR: Gemini API request failed: {e}", flush=True)
+            return
 
+        print("📊 Creating structured JSON request...", flush=True)
         model = "gemini-2.5-flash"
         contents = [
             types.Content(
@@ -151,7 +148,9 @@ Please analyze this specific election and provide NELDA coding for all relevant 
                 ],
             )
         ]
+        print("✓ JSON request content created", flush=True)
 
+        print("🏗️ Creating NELDA schema...", flush=True)
         # Create reusable schema for NELDA variables
         nelda_variable_schema = genai.types.Schema(
             type=genai.types.Type.STRING,
@@ -160,6 +159,7 @@ Please analyze this specific election and provide NELDA coding for all relevant 
 
         # Generate properties for all NELDA variables (1-58)
         nelda_properties = {f"NELDA{i}": nelda_variable_schema for i in range(1, 59)}
+        print(f"✓ Schema created for {len(nelda_properties)} NELDA variables", flush=True)
 
         generate_content_config = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(thinking_budget=-1),
@@ -169,26 +169,41 @@ Please analyze this specific election and provide NELDA coding for all relevant 
                 properties=nelda_properties,
             ),
         )
+        print("✓ JSON generation config created", flush=True)
 
-        jsonResponse = client.models.generate_content(
-            model=model, contents=contents, config=generate_content_config
-        )
+        print("🔄 Requesting structured JSON from Gemini...", flush=True)
+        try:
+            jsonResponse = client.models.generate_content(
+                model=model, contents=contents, config=generate_content_config
+            )
+            print("✓ Received JSON response from Gemini", flush=True)
+        except Exception as e:
+            print(f"ERROR: JSON generation failed: {e}", flush=True)
+            return
 
+        print("🔍 Parsing and validating JSON response...", flush=True)
         # Parse and validate the JSON response
         try:
             parsed_response = json.loads(jsonResponse.text)
-        except json.JSONDecodeError:
-            return jsonify({"error": "Failed to parse JSON response from AI"}), 500
+            print(f"✓ JSON parsed successfully - found {len(parsed_response)} fields", flush=True)
+        except json.JSONDecodeError as e:
+            print(f"ERROR: Failed to parse JSON response: {e}", flush=True)
+            print(f"Raw response: {jsonResponse.text[:500]}...", flush=True)
+            return
 
         # Check for missing NELDA fields
         expected_fields = [f"NELDA{i}" for i in range(1, 59)]
         missing_fields = [
             field for field in expected_fields if field not in parsed_response
         ]
+        print(
+            f"📋 Field validation: {len(expected_fields) - len(missing_fields)}/{len(expected_fields)} fields present", flush=True
+        )
 
         # If there are missing fields, make follow-up requests
         if missing_fields:
-            print(f"Missing fields detected: {missing_fields}")
+            print(f"⚠️ Missing fields detected: {missing_fields}", flush=True)
+            print("🔄 Attempting follow-up request for missing fields...", flush=True)
 
             # Create follow-up request for missing fields
             missing_fields_str = ", ".join(missing_fields)
@@ -218,9 +233,7 @@ Please analyze this specific election and provide NELDA coding for all relevant 
             ]
 
             # Create schema for only the missing fields
-            missing_properties = {
-                field: nelda_variable_schema for field in missing_fields
-            }
+            missing_properties = {field: nelda_variable_schema for field in missing_fields}
             missing_config = types.GenerateContentConfig(
                 thinking_config=types.ThinkingConfig(thinking_budget=-1),
                 response_mime_type="application/json",
@@ -241,11 +254,11 @@ Please analyze this specific election and provide NELDA coding for all relevant 
                 # Merge the responses
                 parsed_response.update(followup_parsed)
                 print(
-                    f"Successfully retrieved missing fields: {list(followup_parsed.keys())}"
+                    f"✓ Successfully retrieved missing fields: {list(followup_parsed.keys())}", flush=True
                 )
 
             except Exception as e:
-                print(f"Follow-up request failed: {e}")
+                print(f"⚠️ Follow-up request failed: {e}", flush=True)
                 # Continue with partial response
 
         # Final validation - log any still missing fields
@@ -253,8 +266,11 @@ Please analyze this specific election and provide NELDA coding for all relevant 
             field for field in expected_fields if field not in parsed_response
         ]
         if still_missing:
-            print(f"Warning: Still missing fields after follow-up: {still_missing}")
+            print(f"⚠️ Still missing fields after follow-up: {still_missing}", flush=True)
+        else:
+            print("✅ All NELDA fields successfully retrieved!", flush=True)
 
+        print("🏗️ Preparing data for MongoDB storage...", flush=True)
         # Prepare data for MongoDB storage
         mongodb_document = {
             "electionId": election_id,
@@ -274,49 +290,118 @@ Please analyze this specific election and provide NELDA coding for all relevant 
             ),
             "missing_fields": still_missing,
         }
+        print("✓ Document prepared for MongoDB", flush=True)
 
         # Store in MongoDB
+        print("💾 Storing in MongoDB...", flush=True)
         try:
             mongodb_result = store_in_mongodb(mongodb_document)
-            print(f"Successfully stored analysis in MongoDB: {mongodb_result}")
-
-            return (
-                jsonify(
-                    {
-                        "success": True,
-                        "message": "Election analysis completed and stored in database",
-                        "mongodb_id": mongodb_result.get("insertedId"),
-                        "total_fields_returned": len(
-                            [f for f in expected_fields if f in parsed_response]
-                        ),
-                        "missing_fields_recovered": (
-                            len(missing_fields) - len(still_missing)
-                            if missing_fields
-                            else 0
-                        ),
-                    }
-                ),
-                200,
-            )
+            print(f"✅ Successfully stored analysis in MongoDB: {mongodb_result}", flush=True)
+            print("=== BACKGROUND NELDA PROCESSING COMPLETED SUCCESSFULLY ===", flush=True)
 
         except Exception as e:
-            print(f"Failed to store in MongoDB: {e}")
-            # Fallback: return JSON response if MongoDB storage fails
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "error": "Failed to store in database",
-                        "mongodb_error": str(e),
-                        "fallback_data": mongodb_document,
-                    }
-                ),
-                500,
-            )
+            print(f"❌ Failed to store in MongoDB: {e}", flush=True)
+            print("=== BACKGROUND NELDA PROCESSING FAILED ===", flush=True)
 
     except Exception as e:
+        print(f"❌ UNHANDLED ERROR in background processing: {e}", flush=True)
+        print("=== BACKGROUND NELDA PROCESSING FAILED ===", flush=True)
+
+
+def store_in_mongodb(data):
+    """Store election analysis data in MongoDB using pymongo."""
+    username = os.environ.get("MONGODB_USERNAME")
+    password = os.environ.get("MONGODB_PASSWORD")
+
+    if not username or not password:
+        raise ValueError(
+            "MONGODB_USERNAME and MONGODB_PASSWORD must be set in environment variables"
+        )
+
+    # MongoDB connection string for Atlas
+    connection_string = f"mongodb+srv://{username}:{password}@socialchoice.bsut1.mongodb.net/?retryWrites=true&w=majority"
+
+    try:
+        # Connect to MongoDB
+        client = MongoClient(connection_string)
+
+        # Select database and collection
+        db = client["neldaelections"]
+        collection = db["jsoncodings"]
+
+        # Insert the document
+        result = collection.insert_one(data)
+
+        # Close the connection
+        client.close()
+
+        return {"insertedId": str(result.inserted_id)}
+
+    except Exception as e:
+        print(f"MongoDB storage failed: {e}")
+        raise
+
+
+@app.route("/runNelda", methods=["POST"])
+def run_my_script():
+    try:
+        print("=== NELDA API REQUEST START (ASYNC MODE) ===", flush=True)
+
+        # Get JSON data from request body
+        data = request.get_json()
+        print(f"Received request data: {data}", flush=True)
+
+        # Extract required parameters for validation
+        election_id = data.get("electionId")
+        country_name = data.get("countryName")
+        election_types = data.get("types")
+        year = data.get("year")
+        mmdd = data.get("mmdd")
+        pre = data.get("pre")
+
+        print(f"Validating parameters:", flush=True)
+        print(f"  - electionId: {election_id}", flush=True)
+        print(f"  - countryName: {country_name}", flush=True)
+        print(f"  - types: {election_types}", flush=True)
+        print(f"  - year: {year}", flush=True)
+        print(f"  - mmdd: {mmdd}", flush=True)
+        print(f"  - pre: {pre}", flush=True)
+
+        # Validate required parameters
+        if not all(
+            [election_id, country_name, election_types, year, mmdd, pre is not None]
+        ):
+            print("ERROR: Missing required parameters", flush=True)
+            return jsonify({"error": "Missing required parameters"}), 400
+
+        print("✓ All required parameters present", flush=True)
+
+        # Start background processing
+        print("🚀 Starting background processing thread...", flush=True)
+        processing_thread = threading.Thread(
+            target=process_nelda_analysis_background, 
+            args=(data,),
+            daemon=True  # Thread will die when main program exits
+        )
+        processing_thread.start()
+        
+        print("✅ Background processing started successfully", flush=True)
+        print("=== RETURNING IMMEDIATE RESPONSE TO CLIENT ===", flush=True)
+
+        # Return immediate response to client
+        return jsonify({
+            "success": True,
+            "message": "Election analysis started in background",
+            "status": "processing",
+            "electionId": election_id,
+            "note": "Processing will continue even if request times out. Check server logs for completion status."
+        }), 202  # 202 Accepted - request accepted for processing
+
+    except Exception as e:
+        print(f"❌ UNHANDLED ERROR in request handler: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5050)
+    # Enable debug mode and unbuffered output
+    app.run(host="0.0.0.0", port=5050, debug=True)
