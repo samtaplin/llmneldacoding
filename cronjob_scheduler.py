@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 import sys
 import os
 from pathlib import Path
+import time
 
 
 def load_env_file(env_path: str = ".env") -> None:
@@ -66,7 +67,7 @@ class CronjobScheduler:
             "mdays": [target_date.day],  # Specific day of month
             "minutes": [0],  # At minute 0
             "months": [target_date.month],  # Specific month
-            "wdays": [-1]  # Any day of week (-1 means ignore)
+            "wdays": [-1],  # Any day of week (-1 means ignore)
         }
 
     def create_webhook_payload(self, event_data: Dict, is_pre_event: bool) -> Dict:
@@ -100,11 +101,9 @@ class CronjobScheduler:
                 "requestMethod": 1,  # 1 = POST
                 "extendedData": {
                     "body": json.dumps(webhook_payload),
-                    "headers": {
-                        "Content-Type": "application/json"
-                    }
+                    "headers": {"Content-Type": "application/json"},
                 },
-                "title": job_name
+                "title": job_name,
             }
         }
 
@@ -155,6 +154,8 @@ class CronjobScheduler:
         success_count = 0
         total_jobs = len(events) * 2  # 2 jobs per event
 
+        # Collect all jobs to create
+        jobs_to_create = []
         for event in events:
             event_date = self.parse_date(event.get("year", ""), event.get("mmdd", ""))
 
@@ -162,15 +163,33 @@ class CronjobScheduler:
                 print(f"Skipping event with invalid date: {event}")
                 continue
 
-            # Create job for 2 days before
+            # Add job for 2 days before
             pre_date = event_date - timedelta(days=2)
-            if self.create_cronjob(event, pre_date, True, api_key):
-                success_count += 1
+            jobs_to_create.append((event, pre_date, True))
 
-            # Create job for 2 days after
+            # Add job for 2 days after
             post_date = event_date + timedelta(days=2)
-            if self.create_cronjob(event, post_date, False, api_key):
-                success_count += 1
+            jobs_to_create.append((event, post_date, False))
+
+        # Process jobs in batches of 5
+        batch_size = 5
+        for i in range(0, len(jobs_to_create), batch_size):
+            batch = jobs_to_create[i : i + batch_size]
+            print(f"\nProcessing batch {i // batch_size + 1} ({len(batch)} jobs)...")
+
+            for j, (event, target_date, is_pre_event) in enumerate(batch):
+                if self.create_cronjob(event, target_date, is_pre_event, api_key):
+                    success_count += 1
+
+                # Wait 1 second between requests within the batch (except after the last request in the batch)
+                if j < len(batch) - 1:
+                    print(f"⏳ Waiting 1 second before next request...")
+                    time.sleep(1)
+
+            # Wait 60 seconds before next batch (unless this is the last batch)
+            if i + batch_size < len(jobs_to_create):
+                print(f"⏳ Waiting 60 seconds before next batch...")
+                time.sleep(60)
 
         print(f"\nCompleted: {success_count}/{total_jobs} jobs created successfully.")
 
@@ -197,6 +216,10 @@ def main():
 
     # Optional: Get server URL from environment variable
     server_url = os.environ.get("SERVER_URL", "http://localhost:5000")
+    if not server_url:
+        print("Error: SERVER_URL not found in environment or .env file.")
+        print("Create a .env file with: SERVER_URL=https://example.com")
+        sys.exit(1)
 
     scheduler = CronjobScheduler(server_url)
     scheduler.process_events(csv_file_path, api_key)

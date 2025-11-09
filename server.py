@@ -58,7 +58,7 @@ def process_nelda_analysis_background(request_data):
         # Read the NELDA codebook PDF
         try:
             with open(
-                "/Users/samueltaplin/research/llmneldacoding/NELDA_Codebook_V5.pdf",
+                "NELDA_Codebook_V5.pdf",
                 "rb",
             ) as pdf_file:
                 pdf_data = pdf_file.read()
